@@ -145,15 +145,6 @@ pub fn grant_root() -> std::io::Result<()> {
     Ok(())
 }
 
-pub fn disable_escape_to_root() -> std::io::Result<()> {
-    let _ = set_ksu_no_new_privs();
-    Ok(())
-}
-
-pub fn is_uapi_version_mismatch() -> bool {
-    ensure_uapi_version_matched().is_err()
-}
-
 fn report_event(event: u32) {
     let mut cmd = uapi::ksu_report_event_cmd { event };
     let _ = ksuctl(uapi::KSU_IOCTL_REPORT_EVENT_RUST, &raw mut cmd);
