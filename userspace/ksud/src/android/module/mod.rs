@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod metamodule;
 pub mod module_config;
 
