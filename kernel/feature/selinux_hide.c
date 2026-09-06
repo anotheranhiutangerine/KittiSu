@@ -6,7 +6,6 @@
 #include <linux/printk.h>
 #include <linux/string.h>
 #include <linux/fs.h>
-#include <linux/jump_label.h>
 #include <asm-generic/errno-base.h>
 #include <net/genetlink.h>
 #include <linux/moduleparam.h>
@@ -31,7 +30,7 @@
 #include "infra/symbol_resolver.h"
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
 #include "hook/lsm_hook_magic.h"
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0) || defined(KSU_COMPAT_HAS_LIST_OF_LSM_HOOKS)
 #include <linux/lsm_hooks.h>
 #endif
 
@@ -44,12 +43,6 @@
 #define __maybe_static
 #else
 #define __maybe_static static
-#endif
-
-#ifndef CONFIG_KALLSYMS_ALL
-#warning Due to extern hooks for selinux_hide are not completed
-#warning You maybe face selinux_hide does not working when you disable CONFIG_KALLSYMS_ALL
-#error So, ReSukiSU let your build broken before this completed, you can enable CONFIG_KALLSYMS_ALL to solve that
 #endif
 
 static DEFINE_MUTEX(selinux_hide_mutex);
@@ -282,6 +275,8 @@ static ssize_t my_write_access(struct file *file, char *buf, size_t size)
     ksu_security_compute_av_user(ssid, tsid, tclass, &avd);
 #endif
 
+    // stock reads 1; a loader load_policy may have bumped the backup before we load
+    avd.seqno = 1;
     length = scnprintf(buf, SIMPLE_TRANSACTION_LIMIT, "%x %x %x %x %u %x", avd.allowed, 0xffffffff, avd.auditallow,
                        avd.auditdeny, avd.seqno, avd.flags);
 out:
@@ -295,7 +290,8 @@ struct ksu_lsm_hook selinux_setprocattr_hook =
     KSU_LSM_HOOK_INIT(setprocattr, "selinux_setprocattr", ksu_handle_selinux_setprocattr, 0);
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0) &&                                                                   \
+    (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0) || defined(KSU_COMPAT_HAS_LIST_OF_LSM_HOOKS))
 static setprocattr_fn ksu_orig_setprocattr;
 uintptr_t selinux_setprocattr_hook_ptr = 0;
 #else
@@ -391,7 +387,12 @@ static void hook_selinux_status_open()
     if (orig_sel_open_handle_status)
         return;
     if (!sel_open_handle_status_slot) {
+#ifdef CONFIG_KALLSYMS_ALL
         struct file_operations *ops = (struct file_operations *)find_kernel_symbol_exact("sel_handle_status_ops");
+#else
+        extern struct file_operations sel_handle_status_ops;
+        struct file_operations *ops = &sel_handle_status_ops;
+#endif
         if (!ops) {
             pr_err("selinux_hide: sel_handle_status_ops not found, fake status will not work\n");
             return;
@@ -430,7 +431,7 @@ static void ksu_selinux_hide_unhook()
     }
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
     ksu_lsm_unhook(&selinux_setprocattr_hook);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0) || defined(KSU_COMPAT_HAS_LIST_OF_LSM_HOOKS)
     if (ksu_orig_setprocattr) {
         ret = ksu_patch_text((void *)selinux_setprocattr_hook_ptr, &ksu_orig_setprocattr, sizeof(ksu_orig_setprocattr),
                              KSU_PATCH_TEXT_FLUSH_DCACHE);
@@ -455,7 +456,7 @@ static int ksu_selinux_hide_enable()
 {
     int ret;
     pr_info("selinux_hide: init selinux hide\n");
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_SELINUX_POLICY_STRUCT)
     if (!backup_sepolicy) {
         pr_err("no backup sepolicy available, please save feature and reboot to retry!\n");
         return -EAGAIN;
@@ -466,17 +467,19 @@ static int ksu_selinux_hide_enable()
         return -EAGAIN;
     }
 
-#ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
-    hook_selinux_status_open();
-#endif
-
     if (!backup_sidtab) {
         pr_err("no backup sidtab available, please save feature and reboot to retry!\n");
         return -EAGAIN;
     }
 #endif
 
+#ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
+    hook_selinux_status_open();
+#endif
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+
+#ifdef CONFIG_KALLSYMS_ALL
     security_dump_masked_av_fn = find_kernel_symbol_exact("security_dump_masked_av");
     if (!security_dump_masked_av_fn) {
         pr_warn("security_dump_masked_av not found!\n");
@@ -485,9 +488,27 @@ static int ksu_selinux_hide_enable()
     if (!context_struct_compute_av_fn) {
         pr_warn("context_struct_compute_av not found!\n");
     }
+#else
+    extern void security_dump_masked_av(struct policydb * policydb, struct context * scontext,
+                                        struct context * tcontext, u16 tclass, u32 permissions, const char *reason);
+    extern void context_struct_compute_av(struct policydb * policydb, struct context * scontext,
+                                          struct context * tcontext, u16 tclass, struct av_decision * avd,
+                                          struct extended_perms * xperms);
+
+    security_dump_masked_av_fn = &security_dump_masked_av;
+    if (!security_dump_masked_av_fn) {
+        pr_warn("security_dump_masked_av not found!\n");
+    }
+
+    context_struct_compute_av_fn = &context_struct_compute_av;
+    if (!context_struct_compute_av_fn) {
+        pr_warn("context_struct_compute_av not found!\n");
+    }
+#endif
+
 #elif defined(KSU_COMPAT_USE_SELINUX_STATE)
     fake_state.initialized = true;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_SELINUX_POLICY_STRUCT)
     fake_state.policy = backup_sepolicy;
 #else
     fake_state.ss = kzalloc(sizeof(*fake_state.ss), GFP_KERNEL);
@@ -495,6 +516,8 @@ static int ksu_selinux_hide_enable()
         pr_err("selinux_hide: failed alloc selinux_ss!\n");
         return -ENOMEM;
     }
+
+    rwlock_init(&fake_state.ss->policy_rwlock);
 
     // In normal android
     // Only set selinux policy once
@@ -516,12 +539,18 @@ static int ksu_selinux_hide_enable()
     kfree(backup_policydb);
 
     backup_policydb = NULL;
-#endif // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+#endif // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_SELINUX_POLICY_STRUCT)
 
 #endif // #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
 
 #ifndef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
+#ifdef CONFIG_KALLSYMS_ALL
     selinux_write_op = (write_op_fn *)find_kernel_symbol_exact("write_op");
+#else
+    extern ssize_t (*const write_op[])(struct file *, char *, size_t);
+
+    selinux_write_op = (write_op_fn *)&write_op;
+#endif
     if (!selinux_write_op) {
         pr_err("selinux_hide: no write_op found!\n");
         return -ENOSYS;
@@ -553,7 +582,7 @@ static int ksu_selinux_hide_enable()
         pr_err("selinux_hide: init: selinux_setprocattr_hook err: %d\n", ret);
         goto unhook;
     }
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0) || defined(KSU_COMPAT_HAS_LIST_OF_LSM_HOOKS)
     struct security_hook_list *hp;
 
     // https://github.com/torvalds/linux/commit/df0ce17331e2501dbffc060041dfc6c5f85227b5
@@ -606,7 +635,8 @@ static void ksu_selinux_hide_disable()
 {
     pr_info("selinux_hide: exit selinux hide\n");
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0) && defined(KSU_COMPAT_USE_SELINUX_STATE)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0) && defined(KSU_COMPAT_USE_SELINUX_STATE) &&                          \
+    !defined(KSU_COMPAT_HAS_SELINUX_POLICY_STRUCT)
     backup_policydb = kzalloc(sizeof(*backup_policydb), GFP_KERNEL);
     memcpy(backup_policydb, &fake_state.ss->policydb, sizeof(struct policydb));
 
@@ -723,7 +753,7 @@ void __exit ksu_selinux_hide_exit()
 void ksu_selinux_hide_drop_backup_if_unused()
 {
     mutex_lock(&selinux_hide_mutex);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_SELINUX_POLICY_STRUCT)
     if (!ksu_selinux_hide_running && backup_sepolicy) {
         pr_info("selinux_hide is not enabled - drop backup_sepolicy\n");
         sidtab_destroy(backup_sepolicy->sidtab);
@@ -762,8 +792,15 @@ __maybe_static void initialize_fake_status()
     ksu_selinux_status_lock = &selinux_state.status_lock;
 #elif defined(KSU_COMPAT_USE_SELINUX_STATE)
     ksu_selinux_status_lock = &selinux_state.ss->status_lock;
+#elif defined(CONFIG_KALLSYMS_ALL)
+    // call ksu_resolve_symbol_for_functable_hook to search selinux_status_lock
+    // because some compiler add suffix for that
+    // e.g:
+    // 0000000000000000 b selinux_status_lock.llvm.9985633631847037644
+    ksu_selinux_status_lock = (struct mutex *)ksu_resolve_symbol_for_functable_hook("selinux_status_lock");
 #else
-    ksu_selinux_status_lock = (struct mutex *)find_kernel_symbol_exact("selinux_status_lock");
+    extern struct mutex selinux_status_lock;
+    ksu_selinux_status_lock = &selinux_status_lock;
 #endif
 
     mutex_lock(ksu_selinux_status_lock);
@@ -774,8 +811,14 @@ __maybe_static void initialize_fake_status()
     struct page *selinux_status_page = selinux_state.status_page;
 #elif defined(KSU_COMPAT_USE_SELINUX_STATE)
     struct page *selinux_status_page = selinux_state.ss->status_page;
+#elif defined(CONFIG_KALLSYMS_ALL)
+    // call ksu_resolve_symbol_for_functable_hook to search selinux_status_page
+    // because some compiler add suffix for that
+    // e.g:
+    // 0000000000000000 b selinux_status_page.llvm.9985633631847037644
+    struct page *selinux_status_page = *((struct page **)ksu_resolve_symbol_for_functable_hook("selinux_status_page"));
 #else
-    struct page *selinux_status_page = *((struct page **)find_kernel_symbol_exact("selinux_status_page"));
+    extern struct page *selinux_status_page;
 #endif
 
     if (!selinux_status_page) {
@@ -797,12 +840,21 @@ __maybe_static void initialize_fake_status()
 
     struct selinux_kernel_status *new_status = page_address(new_page);
     memcpy(new_status, status, sizeof(*status));
-    if (ksu_late_loaded && !new_status->enforcing) {
-        // In late_load mode, we may be loaded when selinux was set to permissive
-        // So we need to modify the sequence value
-        // We assume that setenforce 0 is just called once
-        new_status->enforcing = 1;
-        new_status->sequence = new_status->policyload ? 4 : 0;
+    if (ksu_late_loaded) {
+        // In late_load mode the loader may have reloaded sepolicy before us,
+        // so the captured page is not stock. Serve what a stock boot ends
+        // with instead: creation sentinel below 6.10, one load plus one
+        // setenforce above.
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0)
+        new_status->sequence = 4;
+        new_status->policyload = 1;
+#else
+        new_status->sequence = 0;
+        new_status->policyload = 0;
+#endif
+        if (!new_status->enforcing) {
+            new_status->enforcing = 1;
+        }
     }
 
     fake_status = new_page;
@@ -1678,6 +1730,17 @@ static void type_attribute_bounds_av(struct context *scontext, struct context *t
     struct type_datum *target;
     u32 masked = 0;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0) || defined(KSU_COMPAT_HAS_MODERN_POLICYDB)
+    // mostly never happen, except Huawei
+    source = backup_policydb->type_val_to_struct[scontext->type - 1];
+    BUG_ON(!source);
+
+    if (!source->bounds)
+        return;
+
+    target = backup_policydb->type_val_to_struct[tcontext->type - 1];
+    BUG_ON(!target);
+#else
     source = flex_array_get_ptr(backup_policydb->type_val_to_struct_array, scontext->type - 1);
     BUG_ON(!source);
 
@@ -1686,6 +1749,8 @@ static void type_attribute_bounds_av(struct context *scontext, struct context *t
 
     target = flex_array_get_ptr(backup_policydb->type_val_to_struct_array, tcontext->type - 1);
     BUG_ON(!target);
+
+#endif
 
     memset(&lo_avd, 0, sizeof(lo_avd));
 
@@ -1728,6 +1793,7 @@ static void avd_init(struct av_decision *avd)
     avd->flags = 0;
 }
 
+#ifndef KSU_COMPAT_HAS_CURRENT_SID
 /*
  * get the subjective security ID of the current task
  */
@@ -1737,6 +1803,7 @@ static inline u32 current_sid(void)
 
     return tsec->sid;
 }
+#endif
 
 /*
  * Compute access vectors and extended permissions based on a context
@@ -1776,10 +1843,21 @@ static void context_struct_compute_av(struct context *scontext, struct context *
 	 */
     avkey.target_class = tclass;
     avkey.specified = AVTAB_AV | AVTAB_XPERMS;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0) ||                                                                   \
+    (defined(KSU_COMPAT_HAS_MODERN_POLICYDB) && !defined(KSU_COMPAT_TYPE_ATTR_MAP_ARRAY_NOT_FOUND))
+    // mostly never happen
+    sattr = &backup_policydb->type_attr_map_array[scontext->type - 1];
+    tattr = &backup_policydb->type_attr_map_array[tcontext->type - 1];
+#elif defined(KSU_COMPAT_TYPE_ATTR_MAP_ARRAY_NOT_FOUND)
+    // huawei! why rename??!
+    sattr = &backup_policydb->type_attr_map[scontext->type - 1];
+    tattr = &backup_policydb->type_attr_map[tcontext->type - 1];
+#else
     sattr = flex_array_get(backup_policydb->type_attr_map_array, scontext->type - 1);
     BUG_ON(!sattr);
     tattr = flex_array_get(backup_policydb->type_attr_map_array, tcontext->type - 1);
     BUG_ON(!tattr);
+#endif
     ebitmap_for_each_positive_bit(sattr, snode, i)
     {
         ebitmap_for_each_positive_bit(tattr, tnode, j)

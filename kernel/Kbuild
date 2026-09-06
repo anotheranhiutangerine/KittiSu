@@ -7,6 +7,7 @@ kernelsu-objs += feature/kernel_umount.o
 kernelsu-objs += feature/sulog.o
 kernelsu-objs += feature/adb_root.o
 kernelsu-objs += feature/selinux_hide.o
+kernelsu-objs += feature/module_load_filter.o
 kernelsu-objs += hook/setuid_hook.o
 
 ifndef CONFIG_KSU_DISABLE_MANAGER
@@ -39,7 +40,7 @@ ifdef CONFIG_ARM64
 kernelsu-objs += compat/apatch_conflict.o
 endif
 
-ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes 
+ccflags-y += -Wno-implicit-function-declaration -Wno-strict-prototypes -Wno-missing-prototypes
 ccflags-y += $(call cc-disable-warning, int-conversion)
 ccflags-y += -Wno-declaration-after-statement -Wno-unused-function -Wno-unused-variable -Wno-missing-braces
 ccflags-y += -Wno-int-to-pointer-cast -Wno-declaration-after-statement
@@ -134,6 +135,12 @@ ifeq ($(KERNEL_TYPE), GKI 2.0)
   kernelsu-objs += hook/lsm_hook_magic.o
 endif
 
+ifeq ($(CONFIG_KSU),y)
+  ifneq ($(CONFIG_KALLSYMS_ALL),y)
+    include $(KSU_SRC)/tools/static_export_check.mk
+  endif
+endif
+
 ifdef CONFIG_KSU_TRACEPOINT_HOOK
   $(info -- $(REPO_NAME): using Tracepoint Syscall Redirect Hook)
 
@@ -161,7 +168,7 @@ ifdef CONFIG_KSU_TRACEPOINT_HOOK
       $(info -- Current Kernel Type: $(KERNEL_TYPE))
       $(info -- If you really want to continue, go to Kbuild and comment out this warning.)
       $(info -- Usually, this error occurs because you forgot to enable some kernel configurations.)
-      $(info -- Read: https://github.com/anotheranhiutangerine/KittiSU)
+      $(info -- Read: https://github.com/terebiko/KittiSU)
       $(error TP hooks are incompatible with Non-GKI/GKI 1.0 kernels.)
     endif
   endif
@@ -192,7 +199,6 @@ endif
 ifdef CONFIG_KPM
   $(info -- CONFIG_KPM is set but KPM is removed from KittiSU; doing nothing.)
 endif
-
 ifndef CONFIG_KSU_TRACEPOINT_HOOK
   # For old kernel, pkg observer maybe let system freeze
   # https://github.com/ReSukiSU/ReSukiSU/issues/82#issuecomment-4015396974

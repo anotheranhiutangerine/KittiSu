@@ -9,6 +9,7 @@
 #include <linux/susfs_def.h>
 #endif
 
+#include <linux/thread_info.h>
 #include "uapi/supercall.h"
 #include "supercall/internal.h"
 #include "arch.h"
@@ -26,6 +27,7 @@
 #endif
 #include "feature/dynamic_manager.h"
 #include "policy/app_profile.h"
+
 #ifdef CONFIG_KSU_TOOLKIT_SUPPORT
 #include <linux/utsname.h> // utsname() and uts_sem
 #include "manager/manager_identity.h" // for change_manager_appid
@@ -53,14 +55,6 @@ static int do_grant_root(void __user *arg)
     return ret;
 }
 
-static int do_disable_escape_to_root(void __user *arg)
-{
-    if (!is_manager() && ksu_get_uid_t(current_euid()) != 0)
-        return -EPERM;
-    set_thread_flag(TIF_KSU_DISABLE_ESCAPE_WITH_ROOT);
-    return 0;
-}
-
 #ifdef CONFIG_KSU_TOOLKIT_SUPPORT
 static uint32_t ksuver_override = 0;
 static uint32_t ksuflags_override = 0;
@@ -68,7 +62,7 @@ static uint32_t ksuflags_override = 0;
 
 static int do_get_info(void __user *arg)
 {
-    struct ksu_get_info_cmd cmd = { .version = KERNEL_SU_VERSION, .flags = 0, .uapi_version = KERNEL_SU_UAPI_VERSION };
+    struct ksu_get_info_cmd cmd = { .version = KERNEL_SU_VERSION, .flags = 0 };
 
 #ifdef MODULE
     cmd.flags |= KSU_GET_INFO_FLAG_LKM;
@@ -83,6 +77,7 @@ static int do_get_info(void __user *arg)
         cmd.flags |= KSU_GET_INFO_FLAG_LATE_LOAD;
     }
     cmd.features = KSU_FEATURE_MAX;
+    cmd.uapi_version = KERNEL_SU_UAPI_VERSION;
 
 #ifdef CONFIG_KSU_TOOLKIT_SUPPORT
     if (ksuver_override)
@@ -103,18 +98,36 @@ static int do_get_info(void __user *arg)
 static int do_get_info_legacy(void __user *arg)
 {
     struct ksu_get_info_legacy_cmd cmd = { .version = KERNEL_SU_VERSION, .flags = 0 };
+
 #ifdef MODULE
     cmd.flags |= KSU_GET_INFO_FLAG_LKM;
 #endif
-    if (is_manager())
+
+    if (is_manager()) {
         cmd.flags |= KSU_GET_INFO_FLAG_MANAGER;
-    if (ksu_late_loaded)
+    }
+    if (ksu_late_loaded) {
         cmd.flags |= KSU_GET_INFO_FLAG_LATE_LOAD;
+    }
 #ifdef EXPECTED_PR_BUILD_SIZE
     cmd.flags |= KSU_GET_INFO_FLAG_PR_BUILD;
 #endif
     cmd.features = KSU_FEATURE_MAX;
-    return copy_to_user(arg, &cmd, sizeof(cmd)) ? -EFAULT : 0;
+
+#ifdef CONFIG_KSU_TOOLKIT_SUPPORT
+    if (ksuver_override)
+        cmd.version = ksuver_override;
+
+    if (ksuflags_override)
+        cmd.flags = ksuflags_override;
+#endif
+
+    if (copy_to_user(arg, &cmd, sizeof(cmd))) {
+        pr_err("get_version: copy_to_user failed\n");
+        return -EFAULT;
+    }
+
+    return 0;
 }
 
 static int do_report_event(void __user *arg)
@@ -847,6 +860,12 @@ static int do_get_sulog_fd(void __user *arg)
     return ksu_install_sulog_fd();
 }
 
+static int do_disable_escape_to_root(void __user *arg)
+{
+    set_thread_flag(TIF_KSU_DISABLE_ESCAPE_WITH_ROOT);
+    return 0;
+}
+
 // 100. GET_FULL_VERSION - Get full version string
 static int do_get_full_version(void __user *arg)
 {
@@ -1173,18 +1192,6 @@ int ksu_try_handle_toolkit_cmd(int magic2, unsigned int cmd, void __user **arg)
 // IOCTL handlers mapping table
 // clang-format off
 static const struct ksu_ioctl_cmd_map ksu_ioctl_handlers[] = {
-    {
-        .cmd = KSU_IOCTL_GET_INFO_LEGACY,
-        .name = "GET_INFO_LEGACY",
-        .handler = do_get_info_legacy,
-        .perm_check = always_allow
-    },
-    {
-        .cmd = KSU_IOCTL_DISABLE_ESCAPE_TO_ROOT,
-        .name = "DISABLE_ESCAPE_TO_ROOT",
-        .handler = do_disable_escape_to_root,
-        .perm_check = allowed_for_su
-    },
     { 
         .cmd = KSU_IOCTL_GRANT_ROOT, 
         .name = "GRANT_ROOT", 
@@ -1196,6 +1203,12 @@ static const struct ksu_ioctl_cmd_map ksu_ioctl_handlers[] = {
         .name = "GET_INFO", 
         .handler = do_get_info, 
         .perm_check = always_allow 
+    },
+    {
+        .cmd = KSU_IOCTL_GET_INFO_LEGACY,
+        .name = "GET_INFO_LEGACY",
+        .handler = do_get_info_legacy,
+        .perm_check = always_allow
     },
     { 
         .cmd = KSU_IOCTL_REPORT_EVENT, 
@@ -1316,6 +1329,12 @@ static const struct ksu_ioctl_cmd_map ksu_ioctl_handlers[] = {
         .name = "GET_SULOG_FD",
         .handler = do_get_sulog_fd,
         .perm_check = only_root
+    },
+    { 
+        .cmd = KSU_IOCTL_DISABLE_ESCAPE_TO_ROOT, 
+        .name = "DISABLE_ESCAPE_TO_ROOT", 
+        .handler = do_disable_escape_to_root, 
+        .perm_check = only_root 
     },
     // downstream begin
     { 

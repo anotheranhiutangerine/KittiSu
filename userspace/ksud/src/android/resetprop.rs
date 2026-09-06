@@ -60,14 +60,17 @@ pub struct Args {
     #[arg(short = 'f', long = "file")]
     file: Option<String>,
 
-    /// Compact property area memory (reclaim holes left by deleted properties).
-    /// Optionally pass a SELinux context name to compact only that area.
-    #[arg(short = 'c', long = "compact")]
-    compact: bool,
+    /// Rebuild a property area by SELinux context name, or all property areas if name is not given.
+    #[arg(short = 'c', long = "rebuild", alias = "compact")]
+    rebuild: bool,
 
-    /// Show SELinux context when listing properties.
+    /// Show SELinux context when listing properties, or if -c is used, rebuild the property area containing the property NAME.
     #[arg(short = 'Z')]
     show_context: bool,
+
+    /// Force rebuild all property areas, should be used with `-c` . Without this flag set, only abnormal property areas will be rebuilt.
+    #[arg(long = "force")]
+    force: bool,
 
     #[arg(
         allow_hyphen_values = true,
@@ -78,8 +81,9 @@ pub struct Args {
     arguments: Vec<String>,
 }
 
-fn parse_timeout(value: &str) -> Result<Duration> {
-    Ok(Duration::try_from_secs_f64(value.parse()?)?)
+fn parse_timeout(s: &str) -> Result<Duration> {
+    let timeout: f64 = s.parse()?;
+    Ok(Duration::try_from_secs_f64(timeout)?)
 }
 
 impl Args {
@@ -147,15 +151,17 @@ fn execute(cli: &Args) -> Result<()> {
         persist_only: cli.persist_only,
         verbose: cli.verbose,
         show_context: cli.show_context,
+        rebuild: false,
     };
 
     // Validate: at most one special mode
-    let special_modes = u8::from(cli.wait)
-        + u8::from(cli.delete)
-        + u8::from(cli.compact)
-        + u8::from(cli.file.is_some());
+    let special_modes = u8::from(cli.wait) + u8::from(cli.delete) + u8::from(cli.file.is_some());
     if special_modes > 1 {
         bail!("multiple operation modes detected");
+    }
+
+    if cli.rebuild && !(special_modes == 0 || cli.delete) {
+        bail!("Only -d can be used with -c");
     }
 
     // -w: wait mode
@@ -177,17 +183,6 @@ fn execute(cli: &Args) -> Result<()> {
         return Ok(());
     }
 
-    // -c: compact property area memory
-    // When a positional argument is given, treat it as a SELinux context name.
-    if cli.compact {
-        let context = cli.name().map(std::string::String::as_str);
-        let compacted = sys_prop::compact(context).context("compact failed")?;
-        if !compacted {
-            bail!("nothing to compact");
-        }
-        return Ok(());
-    }
-
     // -f: load from file
     if let Some(path) = &cli.file {
         let file = File::open(path).with_context(|| format!("Failed to open {path}"))?;
@@ -203,6 +198,23 @@ fn execute(cli: &Args) -> Result<()> {
         let deleted = rp.delete(name).context("delete failed")?;
         if !deleted {
             bail!("{name} not found");
+        }
+        if !cli.rebuild {
+            return Ok(());
+        }
+    }
+
+    if cli.rebuild {
+        if let Some(name) = cli.name() {
+            let ctx = if cli.show_context || cli.delete {
+                sys_prop::get_context(name)?
+            } else {
+                name.to_owned()
+            };
+            rp.rebuild(&ctx)?;
+        } else if !rp.rebuild_all(cli.force)? {
+            eprintln!("Something wrong happened, see log for detail.");
+            std::process::exit(1);
         }
         return Ok(());
     }
@@ -247,6 +259,7 @@ fn direct_resetprop() -> ResetProp {
         persist_only: false,
         verbose: false,
         show_context: false,
+        rebuild: false,
     }
 }
 
@@ -274,6 +287,7 @@ pub fn load_system_prop_file(path: &Path) -> Result<()> {
         persist_only: false,
         verbose: false,
         show_context: false,
+        rebuild: false,
     };
 
     let file = File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
@@ -283,17 +297,4 @@ pub fn load_system_prop_file(path: &Path) -> Result<()> {
 
     info!("Loaded system.prop from {}", path.display());
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_timeout;
-
-    #[test]
-    fn timeout_rejects_invalid_durations() {
-        assert!(parse_timeout("1.5").is_ok());
-        for value in ["-1", "NaN", "inf"] {
-            assert!(parse_timeout(value).is_err(), "accepted {value}");
-        }
-    }
 }

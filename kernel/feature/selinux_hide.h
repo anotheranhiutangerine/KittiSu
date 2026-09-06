@@ -10,7 +10,6 @@ void ksu_selinux_hide_exit();
 void ksu_selinux_hide_drop_backup_if_unused();
 void ksu_selinux_hide_handle_second_stage();
 void ksu_selinux_hide_handle_post_fs_data();
-
 /* Exported symbols for external kernel integration (SUSFS) */
 #ifdef KSU_COMPAT_HAS_SUSFS_FEATURE_SELINUX_HIDE
 extern bool ksu_selinux_hide_enabled;
